@@ -79,25 +79,6 @@ The command **refuses to run** when `APP_ENV=production` unless you pass `--forc
 4. Runs `mysqldump` on the remote MySQL instance
 5. Pipes the dump into your local `mysql` for import
 
-## Local Development
-
-To test the package locally before publishing to Packagist, add a path repository to your app's `composer.json`:
-
-```json
-"repositories": [
-    {
-        "type": "path",
-        "url": "../laravel-db-pull-production"
-    }
-]
-```
-
-Then:
-
-```bash
-composer require ruelluna/laravel-db-pull-production
-```
-
 ## Testing
 
 ```bash
