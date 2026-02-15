@@ -1,7 +1,7 @@
 {
     "name": "ruelluna/laravel-db-pull-production",
     "description": "Artisan command to pull production MySQL database via SSH",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "type": "library",
     "license": "MIT",
     "require": {
