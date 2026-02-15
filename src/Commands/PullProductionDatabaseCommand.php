@@ -3,13 +3,17 @@
 namespace Ruelluna\DbPullProduction\Commands;
 
 use Illuminate\Console\Command;
-use Illuminate\Support\Facades\Process;
+use Ruelluna\DbPullProduction\Jobs\PullProductionDatabaseJob;
+use Ruelluna\DbPullProduction\Services\PullProductionDatabaseService;
+use RuntimeException;
 
 class PullProductionDatabaseCommand extends Command
 {
     protected $signature = 'db:pull-production
                             {--force : Run even when APP_ENV=production}
-                            {--no-backup : Skip backing up local database before replace}';
+                            {--no-backup : Skip backing up local database before replace}
+                            {--async : Dispatch as queued job instead of running synchronously}
+                            {--timeout= : Process timeout in seconds for sync mode (0 = unlimited)}';
 
     protected $description = 'Pull production MySQL database via SSH and replace local database';
 
@@ -26,170 +30,54 @@ class PullProductionDatabaseCommand extends Command
         $remoteDb = $config['database'] ?? [];
         $localDb = config('database.connections.'.config('database.default'));
 
-        if (! $this->validateConfig($ssh, $remoteDb, $localDb)) {
-            return self::FAILURE;
-        }
-
-        $localDatabase = $localDb['database'];
-        $localUsername = $localDb['username'];
-        $localPassword = $localDb['password'] ?? '';
-        $localHost = $localDb['host'] ?? '127.0.0.1';
-        $localPort = $localDb['port'] ?? 3306;
-
-        if (! $this->option('no-backup')) {
-            $backupPath = $this->createLocalBackup($localDatabase, $localUsername, $localPassword, $localHost, $localPort);
-            if ($backupPath === null) {
-                return self::FAILURE;
+        $validation = PullProductionDatabaseService::validateConfig($ssh, $remoteDb, $localDb);
+        if ($validation !== []) {
+            $this->error($validation['error'] ?? 'Configuration invalid.');
+            if (str_contains($validation['error'] ?? '', 'Missing required')) {
+                $this->line('Publish config: php artisan vendor:publish --tag=db-pull-production-config');
             }
-        }
-
-        $sshCommand = $this->buildSshCommand($ssh);
-        $mysqldumpCommand = $this->buildMysqldumpCommand($remoteDb);
-        $remoteCommand = "{$sshCommand} \"{$mysqldumpCommand}\"";
-
-        $this->info('Dumping production database...');
-
-        $process = Process::run($remoteCommand);
-
-        if (! $process->successful()) {
-            $this->error('Failed to dump production database.');
-            $this->error($process->errorOutput());
 
             return self::FAILURE;
         }
 
-        $this->info('Importing into local database...');
+        if ($this->option('async')) {
+            PullProductionDatabaseJob::dispatch(
+                $this->option('force'),
+                $this->option('no-backup')
+            );
+            $this->info('Job dispatched. Monitor logs or queue worker for progress.');
 
-        $mysqlImport = sprintf(
-            'mysql -h %s -P %d -u %s %s',
-            escapeshellarg($localHost),
-            $localPort,
-            escapeshellarg($localUsername),
-            escapeshellarg($localDatabase)
-        );
+            return self::SUCCESS;
+        }
 
-        $importProcess = Process::input($process->output())
-            ->env(['MYSQL_PWD' => $localPassword])
-            ->run($mysqlImport);
+        $timeout = $this->option('timeout') !== null
+            ? (int) $this->option('timeout')
+            : config('db-pull-production.timeout', 600);
 
-        if (! $importProcess->successful()) {
-            $this->error('Failed to import into local database.');
-            $this->error($importProcess->errorOutput());
+        $service = new PullProductionDatabaseService($timeout);
+
+        $bar = $this->output->createProgressBar(100);
+        $bar->setFormat(' %message% %current%%');
+        $bar->start(0);
+
+        $onProgress = fn (string $message, int $percent) => $bar->setMessage($message, 'message') && $bar->setProgress($percent);
+
+        try {
+            $service->execute($this->option('no-backup'), $onProgress);
+        } catch (RuntimeException $e) {
+            $bar->finish();
+            $this->newLine();
+            $this->error($e->getMessage());
 
             return self::FAILURE;
         }
 
+        $bar->setProgress(100);
+        $bar->setMessage('Complete', 'message');
+        $bar->finish();
+        $this->newLine(2);
         $this->info('Production database pulled successfully.');
 
         return self::SUCCESS;
-    }
-
-    private function validateConfig(array $ssh, array $remoteDb, array $localDb): bool
-    {
-        $missing = [];
-
-        if (empty($ssh['host'])) {
-            $missing[] = 'PRODUCTION_SSH_HOST';
-        }
-        if (empty($ssh['key_path'])) {
-            $missing[] = 'PRODUCTION_SSH_KEY_PATH';
-        }
-        if (empty($remoteDb['database'])) {
-            $missing[] = 'PRODUCTION_DB_DATABASE';
-        }
-        if (empty($remoteDb['username'])) {
-            $missing[] = 'PRODUCTION_DB_USERNAME';
-        }
-        if (empty($remoteDb['password'])) {
-            $missing[] = 'PRODUCTION_DB_PASSWORD';
-        }
-        if (empty($localDb['database'])) {
-            $missing[] = 'DB_DATABASE (local)';
-        }
-        if (($localDb['driver'] ?? '') !== 'mysql') {
-            $this->error('Default database connection must be MySQL.');
-
-            return false;
-        }
-
-        if ($missing !== []) {
-            $this->error('Missing required configuration: '.implode(', ', $missing));
-            $this->line('Publish config: php artisan vendor:publish --tag=db-pull-production-config');
-
-            return false;
-        }
-
-        return true;
-    }
-
-    private function createLocalBackup(
-        string $database,
-        string $username,
-        string $password,
-        string $host,
-        int $port
-    ): ?string {
-        $backupDir = storage_path('app/backups');
-        if (! is_dir($backupDir)) {
-            mkdir($backupDir, 0755, true);
-        }
-
-        $timestamp = now()->format('Y-m-d_His');
-        $backupPath = "{$backupDir}/{$database}_{$timestamp}.sql";
-
-        $this->info("Backing up local database to {$backupPath}...");
-
-        $mysqldump = sprintf(
-            'mysqldump -h %s -P %d -u %s %s',
-            escapeshellarg($host),
-            $port,
-            escapeshellarg($username),
-            escapeshellarg($database)
-        );
-
-        $process = Process::env(['MYSQL_PWD' => $password])->run($mysqldump);
-
-        if (! $process->successful()) {
-            $this->error('Failed to create local backup.');
-            $this->error($process->errorOutput());
-
-            return null;
-        }
-
-        file_put_contents($backupPath, $process->output());
-
-        return $backupPath;
-    }
-
-    private function buildSshCommand(array $ssh): string
-    {
-        $parts = [
-            'ssh',
-            '-o', 'StrictHostKeyChecking=no',
-            '-o', 'BatchMode=yes',
-            '-p', (string) ($ssh['port'] ?? 22),
-            '-i', escapeshellarg($ssh['key_path']),
-            sprintf('%s@%s', $ssh['user'] ?? 'forge', $ssh['host']),
-        ];
-
-        return implode(' ', $parts);
-    }
-
-    private function buildMysqldumpCommand(array $db): string
-    {
-        $host = $db['host'] ?? '127.0.0.1';
-        $port = $db['port'] ?? 3306;
-        $database = $db['database'];
-        $username = $db['username'];
-        $password = $db['password'];
-
-        return sprintf(
-            'mysqldump -h %s -P %d -u %s -p%s --single-transaction --quick --lock-tables=false %s',
-            escapeshellarg($host),
-            $port,
-            escapeshellarg($username),
-            escapeshellarg($password),
-            escapeshellarg($database)
-        );
     }
 }

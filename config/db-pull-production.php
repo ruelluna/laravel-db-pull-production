@@ -1,6 +1,8 @@
 <?php
 
 return [
+    'timeout' => (int) env('DB_PULL_PRODUCTION_TIMEOUT', 600),
+    'job_timeout' => (int) env('DB_PULL_PRODUCTION_JOB_TIMEOUT', 3600),
     'ssh' => [
         'host' => env('PRODUCTION_SSH_HOST'),
         'user' => env('PRODUCTION_SSH_USER', 'forge'),

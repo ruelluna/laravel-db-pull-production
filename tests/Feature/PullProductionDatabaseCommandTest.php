@@ -2,9 +2,13 @@
 
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Process;
+use Illuminate\Support\Facades\Queue;
+use Ruelluna\DbPullProduction\Jobs\PullProductionDatabaseJob;
 
 beforeEach(function () {
     config()->set('app.env', 'local');
+    config()->set('db-pull-production.timeout', 600);
+    config()->set('db-pull-production.job_timeout', 3600);
     config()->set('db-pull-production.ssh', [
         'host' => 'prod.example.com',
         'user' => 'forge',
@@ -60,4 +64,14 @@ it('registers the db:pull-production command', function () {
     $commands = Artisan::all();
 
     expect($commands)->toHaveKey('db:pull-production');
+});
+
+it('dispatches job when --async is passed', function () {
+    Queue::fake();
+
+    $this->artisan('db:pull-production', ['--async' => true, '--no-backup' => true])
+        ->expectsOutputToContain('Job dispatched')
+        ->assertSuccessful();
+
+    Queue::assertPushed(PullProductionDatabaseJob::class);
 });
